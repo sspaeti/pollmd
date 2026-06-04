@@ -1,0 +1,32 @@
+#!/bin/sh
+#
+# PROVIDE: survey
+# REQUIRE: NETWORKING
+# KEYWORD: shutdown
+#
+# Add to /etc/rc.conf:  survey_enable="YES"
+# Env file:             /usr/local/etc/survey/survey.env
+# Logs:                 /var/log/survey/survey.log
+
+. /etc/rc.subr
+
+name="survey"
+rcvar="survey_enable"
+pidfile="/var/run/${name}.pid"
+logfile="/var/log/survey/survey.log"
+survey_user="survey"
+survey_env_file="/usr/local/etc/survey/survey.env"
+
+command="/usr/sbin/daemon"
+command_args="-c -f -P ${pidfile} -o ${logfile} -t ${name} -u ${survey_user} /usr/local/bin/survey"
+
+load_rc_config $name
+: ${survey_enable:=no}
+
+if [ -f "${survey_env_file}" ]; then
+    set -a
+    . "${survey_env_file}"
+    set +a
+fi
+
+run_rc_command "$1"
