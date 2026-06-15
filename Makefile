@@ -10,7 +10,7 @@ DUCKDB_VER ?= 1.5.3
 BUILD_FLAGS := -tags=duckdb_use_lib
 
 .PHONY: test fmt vet sync build deploy logs status query token duckdb-connect push-installer install-on-server smoke help \
-        railway-token railway-docker-build railway-docker-run railway-duckdb-connect survey-result
+        railway-token railway-docker-build railway-docker-run railway-duckdb-connect survey-result survey-reset
 
 SURVEY_HOST ?= survey.sspaeti.duckdns.org
 QUACK_HOST  ?= quack.sspaeti.duckdns.org
@@ -41,6 +41,9 @@ help:
 	@echo "  survey-result            - one-shot tally with bar chart of all surveys"
 	@echo "                             (same env vars as railway-duckdb-connect)"
 	@echo "                             pass SURVEY_ID=<id> for a single-survey detail view"
+	@echo "  survey-reset             - DELETE every vote for a given SURVEY_ID."
+	@echo "                             Prompts to confirm (skip with CONFIRM=yes)."
+	@echo "                             usage: make survey-reset SURVEY_ID=<id>"
 	@echo ""
 	@echo "Server target (run on FreeBSD as root, after 'ssh $(HOST)' && 'su root'):"
 	@echo "  install-on-server - one-shot setup: pkg deps, DuckDB $(DUCKDB_VER) build,"
@@ -239,3 +242,42 @@ survey-result:
 	  else \
 	    duckdb -init "$$tmp" -c "WITH t AS (SELECT survey_id, answer, count(*) AS clicks FROM remote_votes GROUP BY ALL), m AS (SELECT survey_id, max(clicks) AS top FROM t GROUP BY survey_id) SELECT t.survey_id, t.answer, t.clicks, bar(t.clicks, 0, m.top, 30) AS chart FROM t JOIN m USING (survey_id) ORDER BY t.survey_id DESC, t.clicks DESC;"; \
 	  fi
+
+# Wipe every vote for SURVEY_ID. Requires explicit SURVEY_ID and an
+# interactive "yes" (or CONFIRM=yes for non-interactive flows).
+#
+#   make survey-reset SURVEY_ID=init
+#   make survey-reset SURVEY_ID=init CONFIRM=yes    # no prompt
+#
+# Uses DELETE ... RETURNING * so you see exactly what got wiped.
+survey-reset:
+	@command -v duckdb >/dev/null || { echo "error: duckdb CLI not on PATH (install duckdb locally first)" >&2; exit 1; }
+	@if [ -z "$$SURVEY_QUACK_TOKEN" ] || [ -z "$$RAILWAY_QUACK_HOST" ] || [ -z "$$RAILWAY_QUACK_PORT" ]; then \
+	    echo "error: need SURVEY_QUACK_TOKEN, RAILWAY_QUACK_HOST, RAILWAY_QUACK_PORT" >&2; \
+	    echo "       see docs/install-railway.md" >&2; \
+	    exit 1; \
+	fi
+	@if [ -z "$(SURVEY_ID)" ]; then \
+	    echo "error: SURVEY_ID is required (no default to prevent accidents)" >&2; \
+	    echo "       usage: make survey-reset SURVEY_ID=<id>" >&2; \
+	    exit 1; \
+	fi
+	@if ! echo "$(SURVEY_ID)" | grep -qE '^[a-z0-9][a-z0-9_-]{0,63}$$'; then \
+	    echo "error: SURVEY_ID must match ^[a-z0-9][a-z0-9_-]{0,63}\$$" >&2; \
+	    exit 1; \
+	fi
+	@tmp=$$(mktemp) && trap "rm -f $$tmp" EXIT INT TERM HUP && \
+	  printf "INSTALL quack;\nLOAD quack;\nCREATE OR REPLACE MACRO rq(sql) AS TABLE (FROM quack_query('quack:%s:%s', sql, token => '%s', disable_ssl => true));\n" \
+	    "$$RAILWAY_QUACK_HOST" "$$RAILWAY_QUACK_PORT" "$$SURVEY_QUACK_TOKEN" > "$$tmp" && \
+	  echo "" && \
+	  echo "Current votes for survey_id='$(SURVEY_ID)':" && \
+	  duckdb -init "$$tmp" -c "FROM rq('SELECT answer, count(*) AS clicks FROM votes WHERE survey_id = ''$(SURVEY_ID)'' GROUP BY answer ORDER BY clicks DESC');" && \
+	  if [ "$(CONFIRM)" != "yes" ]; then \
+	    printf "\nDelete all votes for survey_id='$(SURVEY_ID)'? Type 'yes' to confirm: "; \
+	    read ans; \
+	    [ "$$ans" = "yes" ] || { echo "aborted."; exit 1; }; \
+	  fi && \
+	  echo "" && \
+	  echo "Deleted rows:" && \
+	  duckdb -init "$$tmp" -c "FROM rq('DELETE FROM votes WHERE survey_id = ''$(SURVEY_ID)'' RETURNING *');" && \
+	  echo "done."
