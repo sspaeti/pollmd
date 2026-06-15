@@ -3,3 +3,4 @@ build/
 *.duckdb.wal
 *.duckdb.tmp
 .DS_Store
+.claude/
