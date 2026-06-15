@@ -182,6 +182,6 @@ railway-duckdb-connect:
 	    exit 1; \
 	fi
 	@tmp=$$(mktemp) && trap "rm -f $$tmp" EXIT INT TERM HUP && \
-	  printf "INSTALL quack;\nLOAD quack;\nATTACH 'quack:%s:%s' AS s (TYPE QUACK, TOKEN '%s', DISABLE_SSL true);\n.echo on\n.echo \"\\\\nConnected. Try:  FROM s.votes ORDER BY ts DESC LIMIT 10;\\\\n\"\n.echo off\n" \
+	  printf "INSTALL quack;\nLOAD quack;\nATTACH 'quack:%s:%s' AS s (TOKEN '%s', DISABLE_SSL true);\n.echo on\n.echo \"\\\\nConnected. Try:  FROM s.votes ORDER BY ts DESC LIMIT 10;\\\\n\"\n.echo off\n" \
 	    "$$RAILWAY_QUACK_HOST" "$$RAILWAY_QUACK_PORT" "$$SURVEY_QUACK_TOKEN" > "$$tmp" && \
 	  duckdb -init "$$tmp"

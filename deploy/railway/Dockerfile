@@ -1,6 +1,5 @@
 # Multi-stage build for Railway. Build context is the repo root; this
-# Dockerfile is pointed to from deploy/railway/railway.json (or set by hand
-# in the Railway service settings).
+# Dockerfile is pointed to from railway.json's dockerfilePath.
 #
 # Runtime is debian:bookworm-slim (glibc) because duckdb-go-bindings/v2
 # embeds a prebuilt libduckdb.so for linux-amd64 / linux-arm64 and extracts
@@ -15,7 +14,7 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 
-COPY cmd/    ./cmd/
+COPY cmd/ ./cmd/
 COPY internal/ ./internal/
 
 RUN CGO_ENABLED=1 go build -ldflags="-s -w" -o /out/survey ./cmd/survey
@@ -27,27 +26,24 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-RUN useradd --system --uid 1001 --home-dir /var/db/survey --create-home survey \
-    && mkdir -p /var/db/survey \
-    && chown -R survey:survey /var/db/survey
+RUN mkdir -p /var/db/survey
 
 COPY --from=build /out/survey /usr/local/bin/survey
 
-USER survey
+# Image-level defaults. Both listeners bind to 0.0.0.0 so Railway's proxy
+# (HTTP edge + TCP Proxy) can reach them. We deliberately do NOT use $PORT
+# magic — Railway sets $PORT for internal convention only, and inferring
+# from it conflicts with multi-port apps like this one (HTTP + Quack).
+#
+# Override via Railway env vars only if you genuinely need different ports.
+# Then update the matching Public Networking target port + TCP Proxy target
+# port in the dashboard.
+ENV SURVEY_HTTP_ADDR=0.0.0.0:8080 \
+    SURVEY_QUACK_ADDR=0.0.0.0:9494 \
+    SURVEY_DB_PATH=/var/db/survey/votes.duckdb
+
 WORKDIR /var/db/survey
 
-# Cosmetic; Railway routes via $PORT and TCP Proxy mappings, not EXPOSE.
-# Only EXPOSE 8080 to discourage platforms from choosing 9494 as $PORT.
-EXPOSE 8080
+EXPOSE 8080 9494
 
-# Bind HTTP to Railway's assigned $PORT when present. Falls back to
-# SURVEY_HTTP_ADDR (or the app default) outside Railway/local.
-ENTRYPOINT ["/bin/sh", "-c", "\
-  # Bind HTTP to Railway-assigned $PORT when present\n\
-  if [ -n \"$PORT\" ]; then export SURVEY_HTTP_ADDR=\"0.0.0.0:$PORT\"; fi;\n\
-  # If HTTP and Quack would collide (rarely when PORT=9494), move Quack to 9495.\n\
-  qp=\"${SURVEY_QUACK_ADDR##*:}\";\n\
-  if [ -z \"$qp\" ] || [ \"$SURVEY_QUACK_ADDR\" = \"\" ]; then qp=9494; fi;\n\
-  if [ -n \"$PORT\" ] && [ \"$PORT\" = \"$qp\" ]; then export SURVEY_QUACK_ADDR=\"0.0.0.0:9495\"; fi;\n\
-  exec /usr/local/bin/survey\n\
-"]
+ENTRYPOINT ["/usr/local/bin/survey"]
