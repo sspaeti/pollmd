@@ -30,6 +30,54 @@ var staticFS embed.FS
 // table free of arbitrary user-supplied data.
 var slugRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
 
+// botUASubstrings matches common link unfurlers, RSS readers, search
+// crawlers, headless-browser link checkers, and security scanners that
+// fetch the URL with GET but do not represent a human click. Matched
+// case-insensitively as substrings against the User-Agent header.
+//
+// Refine this list when a new platform shows up in the vote tally with
+// suspicious volume — re-deploy and re-test. Order does not matter.
+var botUASubstrings = []string{
+	// Social media link unfurlers
+	"twitterbot", "facebookexternalhit", "linkedinbot", "slackbot",
+	"slack-imgproxy", "discordbot", "telegrambot", "whatsapp",
+	"skypeuripreview", "redditbot", "pinterestbot", "applebot", "tumblr",
+	"cardyb", "bsky", "bluesky", "mastodon", "akkoma", "pleroma",
+	"fediverse",
+	// Search-engine + SEO crawlers
+	"googlebot", "bingbot", "yandex", "duckduckbot", "baiduspider",
+	"ahrefsbot", "semrushbot", "mj12bot", "petalbot",
+	// Headless browser link checkers
+	"headlesschrome", "phantomjs", "puppeteer", "selenium", "playwright",
+	"lighthouse",
+	// RSS / feed readers
+	"feedfetcher", "rssbot", "inoreader", "feedly", "newsblur",
+	// Generic HTTP clients (bots rarely customise these)
+	"curl/", "wget/", "python-requests", "python-urllib",
+	"go-http-client", "okhttp", "java/", "apache-httpclient", "httpx",
+	"node-fetch", "axios/",
+	// Security / Safe-Links / URL scanners
+	"safelinks", "urlscan", "virustotal", "phishtank",
+	// Generic bot markers
+	"bot/", "crawler", "spider", "scraper", "preview",
+}
+
+// isBotUA returns true for User-Agent strings that look like automation
+// rather than a human-driven browser. An empty UA also counts — every
+// mainstream browser sends one.
+func isBotUA(ua string) bool {
+	if ua == "" {
+		return true
+	}
+	ua = strings.ToLower(ua)
+	for _, sub := range botUASubstrings {
+		if strings.Contains(ua, sub) {
+			return true
+		}
+	}
+	return false
+}
+
 type Server struct {
 	cfg    Config
 	store  *store.Store
@@ -90,8 +138,17 @@ func (s *Server) handleSurvey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ip := clientIP(r)
 	ua := r.Header.Get("User-Agent")
+	// Social-media link unfurlers, RSS readers, security scanners, etc. fetch
+	// the URL with GET (not HEAD), so this is needed in addition to the HEAD
+	// guard above. Reply 200 but do not record.
+	if isBotUA(ua) {
+		log.Printf("bot-skip survey_id=%s answer=%s", surveyID, answer)
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	ip := clientIP(r)
 	vh := voter.Hash(ip, ua, surveyID, s.salt.Current())
 
 	if err := s.store.RecordVote(surveyID, answer, vh); err != nil {
