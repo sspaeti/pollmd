@@ -6,3 +6,5 @@ build/
 .claude/
 CLAUDE.md
 
+# roborev snapshots
+/.roborev/

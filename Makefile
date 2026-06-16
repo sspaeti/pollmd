@@ -10,7 +10,7 @@ DUCKDB_VER ?= 1.5.3
 BUILD_FLAGS := -tags=duckdb_use_lib
 
 .PHONY: test fmt vet sync build deploy logs status query token duckdb-connect push-installer install-on-server smoke help \
-        railway-token railway-docker-build railway-docker-run railway-duckdb-connect survey-result survey-reset survey-create
+        railway-token railway-docker-build railway-docker-run railway-duckdb-connect survey-result survey-reset survey-create survey-delete
 
 SURVEY_HOST ?= survey.sspaeti.duckdns.org
 QUACK_HOST  ?= quack.sspaeti.duckdns.org
@@ -55,6 +55,11 @@ help:
 	@echo "                             and a ready-to-paste markdown block of vote links."
 	@echo "                             Override host with PUBLIC_URL=https://your.host"
 	@echo "                             usage: make survey-create SURVEY_ID=<id> ANSWERS=a,b,c"
+	@echo "  survey-delete            - Nuke a survey completely: deletes every vote AND"
+	@echo "                             the surveys-table row in one go. Use survey-reset"
+	@echo "                             if you only want to drop votes but keep the lock."
+	@echo "                             Prompts to confirm (skip with CONFIRM=yes)."
+	@echo "                             usage: make survey-delete SURVEY_ID=<id>"
 	@echo ""
 	@echo "Server target (run on FreeBSD as root, after 'ssh $(HOST)' && 'su root'):"
 	@echo "  install-on-server - one-shot setup: pkg deps, DuckDB $(DUCKDB_VER) build,"
@@ -303,10 +308,9 @@ survey-reset:
 #   make survey-create SURVEY_ID=2026-06-15 ANSWERS=awesome,good,better,worse
 #
 # Re-running upserts the row, so editing the answer set is a re-run with
-# new ANSWERS. To revert a survey back to open mode, delete its row via
-# `make survey-reset SURVEY_ID=<id>` is the wrong target (wipes votes); use
-# `make railway-duckdb-connect` and `FROM rq('DELETE FROM surveys WHERE
-# survey_id = ''<id>''')`.
+# new ANSWERS. To remove a survey entirely (registration + votes), run
+# `make survey-delete SURVEY_ID=<id>`. To only drop votes but keep the
+# answer lock in place, run `make survey-reset SURVEY_ID=<id>`.
 survey-create:
 	@command -v duckdb >/dev/null || { echo "error: duckdb CLI not on PATH (install duckdb locally first)" >&2; exit 1; }
 	@if [ -z "$$SURVEY_QUACK_TOKEN" ] || [ -z "$$RAILWAY_QUACK_HOST" ] || [ -z "$$RAILWAY_QUACK_PORT" ]; then \
@@ -354,4 +358,50 @@ survey-create:
 	  echo "Live tally page:" && \
 	  echo "  $(PUBLIC_URL)/result/$(SURVEY_ID)" && \
 	  echo "" && \
+	  echo "done."
+
+# Fully nuke a survey: delete every vote AND the surveys-table row in one
+# command. If you only want to drop votes but keep the allowed-answers
+# lock in place, use survey-reset.
+#
+#   make survey-delete SURVEY_ID=test123
+#   make survey-delete SURVEY_ID=test123 CONFIRM=yes    # no prompt
+survey-delete:
+	@command -v duckdb >/dev/null || { echo "error: duckdb CLI not on PATH (install duckdb locally first)" >&2; exit 1; }
+	@if [ -z "$$SURVEY_QUACK_TOKEN" ] || [ -z "$$RAILWAY_QUACK_HOST" ] || [ -z "$$RAILWAY_QUACK_PORT" ]; then \
+	    echo "error: need SURVEY_QUACK_TOKEN, RAILWAY_QUACK_HOST, RAILWAY_QUACK_PORT" >&2; \
+	    echo "       see docs/install-railway.md" >&2; \
+	    exit 1; \
+	fi
+	@if [ -z "$(SURVEY_ID)" ]; then \
+	    echo "error: SURVEY_ID is required (no default to prevent accidents)" >&2; \
+	    echo "       usage: make survey-delete SURVEY_ID=<id>" >&2; \
+	    exit 1; \
+	fi
+	@if ! echo "$(SURVEY_ID)" | grep -qE '^[a-z0-9][a-z0-9_-]{0,63}$$'; then \
+	    echo "error: SURVEY_ID must match ^[a-z0-9][a-z0-9_-]{0,63}\$$" >&2; \
+	    exit 1; \
+	fi
+	@tmp=$$(mktemp) && trap "rm -f $$tmp" EXIT INT TERM HUP && \
+	  printf "INSTALL quack;\nLOAD quack;\nCREATE OR REPLACE MACRO rq(sql) AS TABLE (FROM quack_query('quack:%s:%s', sql, token => '%s', disable_ssl => true));\n" \
+	    "$$RAILWAY_QUACK_HOST" "$$RAILWAY_QUACK_PORT" "$$SURVEY_QUACK_TOKEN" > "$$tmp" && \
+	  echo "" && \
+	  echo "Current registration for survey_id='$(SURVEY_ID)':" && \
+	  duckdb -init "$$tmp" -c "FROM rq('SELECT survey_id, allowed_answers, created_at FROM surveys WHERE survey_id = ''$(SURVEY_ID)''');" && \
+	  echo "" && \
+	  echo "Current votes for survey_id='$(SURVEY_ID)':" && \
+	  duckdb -init "$$tmp" -c "FROM rq('SELECT answer, count(*) AS clicks FROM votes WHERE survey_id = ''$(SURVEY_ID)'' GROUP BY answer ORDER BY clicks DESC');" && \
+	  if [ "$(CONFIRM)" != "yes" ]; then \
+	    printf "\nDelete the registration AND every vote for survey_id='$(SURVEY_ID)'? Type 'yes' to confirm: "; \
+	    read ans; \
+	    [ "$$ans" = "yes" ] || { echo "aborted."; exit 1; }; \
+	  fi && \
+	  echo "" && \
+	  echo "Deleted votes:" && \
+	  duckdb -init "$$tmp" -c "FROM rq('DELETE FROM votes WHERE survey_id = ''$(SURVEY_ID)'' RETURNING *');" && \
+	  echo "" && \
+	  echo "Deleted registration:" && \
+	  duckdb -init "$$tmp" -c "FROM rq('DELETE FROM surveys WHERE survey_id = ''$(SURVEY_ID)'' RETURNING *');" && \
+	  echo "" && \
+	  echo "Survey '$(SURVEY_ID)' fully removed." && \
 	  echo "done."

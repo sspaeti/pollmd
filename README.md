@@ -137,6 +137,104 @@ See [q.ssp.sh/result/init/](https://survey.ssp.sh/result/2026-06-04) as an examp
 ![image](static/images/result-example.webp)
 
 
+## Architecture
+
+Single Go process. `libduckdb` 1.5.3 is compiled in via
+`duckdb-go-bindings/v2`, and the Quack extension is `INSTALL`'d / `LOAD`'d
+at startup. **The same in-process DuckDB serves both sides** — HTTP click
+writes and Quack remote reads share one writer, which is what DuckDB
+needs (single-writer constraint).
+
+```mermaid
+flowchart LR
+    subgraph readers["Newsletter readers"]
+        B["Browser"]
+    end
+
+    subgraph laptop["You (laptop)"]
+        M["make survey-create<br/>make survey-result<br/>make survey-reset"]
+        D["local duckdb CLI<br/>+ quack extension"]
+    end
+
+    subgraph rly["Railway"]
+        Edge["HTTPS edge · auto-TLS"]
+        TCP["TCP Proxy · plaintext + token"]
+
+        subgraph cont["pollmd container · single Go process (CGO)"]
+            HTTP["net/http :8080<br/>vote / landing / result / thanks / style"]
+            QSrv["Quack listener :9494<br/>started by CALL quack_serve"]
+            DB[("libduckdb 1.5.3<br/>single writer · in-process")]
+            Salt["32-byte salt in memory<br/>rotates @ UTC midnight"]
+        end
+
+        V[("Persistent volume<br/>votes.duckdb")]
+    end
+
+    B -->|GET /{id}/{answer}| Edge
+    Edge --> HTTP
+    HTTP -->|"RecordVote, TallyBySurvey, GetAllowedAnswers"| DB
+    HTTP -.->|voter.Hash| Salt
+
+    M -->|"survey-create writes via Quack"| TCP
+    D -->|"quack_query over HTTP"| TCP
+    TCP --> QSrv
+    QSrv -->|"reads/writes in same process"| DB
+
+    DB --> V
+```
+
+**Write path** (newsletter click): browser → Railway HTTPS edge → Go
+`net/http` mux → `handleSurvey` → `store.RecordVote` → in-process
+`libduckdb` → `votes.duckdb` on the persistent volume. Go and DuckDB
+are not separate services; CGO links the two.
+
+**Read path** (your laptop queries): local `duckdb` CLI →
+`quack_query(…)` over HTTP → Railway TCP Proxy (plaintext, token
+authenticates) → Quack listener on container port 9494 → same
+`libduckdb` in the same process → same file. Quack is never used for
+recording votes; it's the read-side / admin channel.
+
+The only thing `make survey-create` / `survey-reset` / `survey-result`
+use Quack for **is admin SQL** (INSERT into `surveys`, DELETE from
+`votes`, SELECT for the bar-chart tally). Vote recording always goes
+through HTTP.
+
+### One vote, end to end
+
+```mermaid
+flowchart TD
+    Click["Browser clicks<br/>https://q.ssp.sh/2026-06-04/awesome"]
+    Click --> Edge["Railway HTTPS edge"]
+    Edge --> H["Go handleSurvey()"]
+    H --> Method{"HTTP method?"}
+    Method -->|"HEAD (Safe Links prefetch)"| OK1["200 · no record"]
+    Method -->|GET| Slug{"slug regex<br/>matches id + answer?"}
+    Slug -->|no| Err["400 Bad Request"]
+    Slug -->|yes| Bot{"User-Agent<br/>looks like a bot?"}
+    Bot -->|"TwitterBot, etc."| OK2["200 · log bot-skip"]
+    Bot -->|browser| Reg{"survey_id<br/>in surveys table?"}
+    Reg -->|"no (open mode)"| Hash["voter = sha256(ip || ua || daily_salt || survey_id)[:16]"]
+    Reg -->|yes &amp; answer allowed| Hash
+    Reg -->|yes &amp; answer NOT allowed| OK3["200 · log answer-reject"]
+    Hash --> Up[("INSERT INTO votes<br/>ON CONFLICT (survey_id, voter)<br/>DO UPDATE — last vote wins")]
+    Up --> Redir["302 → /thanks · log vote"]
+```
+
+Key consequences of this shape:
+
+- **No second writer.** Quack runs *inside* the same Go process as the
+  HTTP server, so there's exactly one thing writing to
+  `votes.duckdb` — required by DuckDB.
+- **One click = at most one row per (survey_id, voter) per day.** Re-clicks
+  upsert. The daily salt rotation is the dedup window — after midnight
+  UTC, the salt regenerates and the same reader produces a different
+  hash for the same survey, so they could vote again. That's a feature
+  for multi-day polls and the price of not persisting any identifier.
+- **The landing page (`/{id}`) and the markdown links resolve to the
+  same handler.** Clicking a button on the landing page hits the same
+  `/{id}/{answer}` route as the newsletter link → same voter hash →
+  same row → same upsert.
+
 ## How votes are deduplicated
 
 `voter = sha256(ip || ua || daily_salt || survey_id)[:16]` (hex).
