@@ -68,6 +68,8 @@ Copy the output — you'll paste it into env vars next.
 
 `${{PORT}}` is Railway's variable-reference syntax — it expands to whatever Railway assigns at runtime. Don't hard-code `8080`.
 
+For per-survey answer locking, **don't use env vars** — use the `make survey-create` target instead (writes a row into the `surveys` table via Quack). See the README's "Locking answers per survey" section. Unregistered surveys stay in open mode.
+
 ### 5. Expose the Quack port via TCP Proxy
 
 - **Service → Settings → Networking → TCP Proxy → +Add**

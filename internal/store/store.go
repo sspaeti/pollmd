@@ -2,8 +2,10 @@ package store
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"regexp"
+	"strings"
 
 	_ "github.com/duckdb/duckdb-go/v2"
 )
@@ -12,13 +14,26 @@ type Store struct {
 	db *sql.DB
 }
 
-const schema = `
+// votes  — every recorded click. Upserted by (survey_id, voter).
+// surveys — optional per-survey allowed-answer allowlist. Empty / row-absent
+// means "open mode" (any slug-valid answer counts). Populated via the
+// `make survey-create` target which writes through Quack with the same
+// SURVEY_QUACK_TOKEN as `survey-reset`.
+const schemaVotes = `
 CREATE TABLE IF NOT EXISTS votes (
     ts        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     survey_id VARCHAR   NOT NULL,
     answer    VARCHAR   NOT NULL,
     voter     VARCHAR   NOT NULL,
     PRIMARY KEY (survey_id, voter)
+);
+`
+
+const schemaSurveys = `
+CREATE TABLE IF NOT EXISTS surveys (
+    survey_id       VARCHAR   PRIMARY KEY,
+    allowed_answers VARCHAR   NOT NULL,
+    created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 `
 
@@ -40,8 +55,11 @@ func Open(path, quackAddr, quackToken string) (*Store, error) {
 	// quack_serve call share the same session.
 	db.SetMaxOpenConns(1)
 
-	if _, err := db.Exec(schema); err != nil {
-		return nil, fmt.Errorf("schema: %w", err)
+	if _, err := db.Exec(schemaVotes); err != nil {
+		return nil, fmt.Errorf("schema votes: %w", err)
+	}
+	if _, err := db.Exec(schemaSurveys); err != nil {
+		return nil, fmt.Errorf("schema surveys: %w", err)
 	}
 
 	// Quack ships via the `core` extension repo from DuckDB 1.5.3 onwards.
@@ -86,6 +104,32 @@ func (s *Store) RecordVote(surveyID, answer, voter string) error {
 type Tally struct {
 	Answer string
 	Clicks int
+}
+
+// GetAllowedAnswers returns the per-survey answer allowlist as a set. A nil
+// map means "the survey is not registered" — the vote handler treats that as
+// open mode (any slug-valid answer counts). An empty (non-nil) map would
+// mean "registered but allows nothing" — we don't expose that state, since
+// the Makefile target rejects empty answer lists up-front.
+func (s *Store) GetAllowedAnswers(surveyID string) (map[string]bool, error) {
+	var raw string
+	err := s.db.QueryRow(
+		`SELECT allowed_answers FROM surveys WHERE survey_id = ?`,
+		surveyID,
+	).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]bool)
+	for _, a := range strings.Split(raw, ",") {
+		if a = strings.TrimSpace(a); a != "" {
+			out[a] = true
+		}
+	}
+	return out, nil
 }
 
 // TallyBySurvey returns the per-answer click count for a survey, most popular

@@ -1,10 +1,10 @@
 # minimal-newsletter-survey
 
-A ~200-line Go service that records anonymous reader ratings from newsletter
+Pollmd is a ~200-line Go service that records anonymous reader ratings from newsletter
 links into a [DuckDB](https://ssp.sh/brain/duckdb) file. Per-newsletter, per-answer, no cookies, no JS.
 Query the results from your laptop over Quack.
 
-Design doc: [`docs/superpowers/specs/2026-06-04-newsletter-survey-design.md`](docs/superpowers/specs/2026-06-04-newsletter-survey-design.md).
+Initial design doc: [`docs/superpowers/specs/2026-06-04-newsletter-survey-design.md`](docs/superpowers/specs/2026-06-04-newsletter-survey-design.md).
 
 ## What it looks like in a newsletter
 
@@ -34,6 +34,62 @@ redirects to a "Thanks!" page.
 The legacy URL shape `https://<host>/survey/<survey_id>/<answer>` is kept
 working so links shipped in past newsletters don't 404 — new newsletters
 should use the shorter `/<survey_id>/<answer>` form.
+
+### Locking answers per survey (optional, per-newsletter)
+
+By default the server records any vote whose URL matches the slug regex —
+useful when you want full flexibility to invent new answer slugs per
+newsletter without touching code, env vars, or remembering to pre-register.
+
+For surveys where you want to lock the answer space to a known set
+(stops URL-fuzzers and curious readers from inventing slugs), register the
+allowed answers **once before sending the newsletter**:
+
+```sh
+make survey-create SURVEY_ID=2026-06-15 ANSWERS=awesome,good,better,worse
+```
+
+That writes a row into the `surveys` table via the same Quack channel as
+`survey-result` and `survey-reset` (same `SURVEY_QUACK_TOKEN`,
+`RAILWAY_QUACK_HOST`, `RAILWAY_QUACK_PORT`). From that moment on, only the
+listed answers count for that `survey_id`. Anything else returns 200 (so
+the click still "succeeds" from the browser's perspective) but no row is
+written. The skip is logged:
+
+```
+answer-reject survey_id=2026-06-15 answer=banana
+```
+
+So the four "official" markdown links keep working:
+
+```markdown
+[Awesome!](https://q.ssp.sh/2026-06-15/awesome)        ← counted
+[Pretty Good](https://q.ssp.sh/2026-06-15/good)        ← counted
+[Could be better](https://q.ssp.sh/2026-06-15/better)  ← counted
+[Worse](https://q.ssp.sh/2026-06-15/worse)             ← counted
+```
+
+While these silently don't:
+
+```
+https://q.ssp.sh/2026-06-15/banana       ← rejected, logged
+https://q.ssp.sh/2026-06-15/not-a-vote   ← rejected, logged
+```
+
+**The default is still wide open** — if you skip `survey-create`, that
+survey behaves like it always has (any slug-valid answer counts). Mix and
+match per newsletter:
+
+```sh
+# Important poll: lock it down
+make survey-create SURVEY_ID=quarterly-review ANSWERS=keep,change,unsubscribe
+
+# Quick experiment: skip survey-create, accept whatever
+# (just send the markdown links and go)
+```
+
+Re-running `survey-create` upserts the row, so editing the allowed set is
+just a re-run with new `ANSWERS=…`.
 
 ### Per-survey results page
 

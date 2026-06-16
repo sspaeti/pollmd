@@ -4,5 +4,5 @@ build/
 *.duckdb.tmp
 .DS_Store
 .claude/
-claude.md
+CLAUDE.md
 

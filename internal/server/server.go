@@ -168,6 +168,24 @@ func (s *Server) handleSurvey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Optional per-survey answer allowlist. Populated by `make survey-create`
+	// (writes a row into the `surveys` table via Quack). If the survey isn't
+	// registered, GetAllowedAnswers returns nil and we stay in open mode —
+	// any slug-valid answer counts. If it IS registered, only listed answers
+	// are recorded; anything else returns 200 without writing, same shape as
+	// the bot-skip path above.
+	allowed, err := s.store.GetAllowedAnswers(surveyID)
+	if err != nil {
+		log.Printf("allowed-answers lookup: survey_id=%s err=%v", surveyID, err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if allowed != nil && !allowed[answer] {
+		log.Printf("answer-reject survey_id=%s answer=%s", surveyID, answer)
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
 	ip := clientIP(r)
 	vh := voter.Hash(ip, ua, surveyID, s.salt.Current())
 

@@ -10,7 +10,7 @@ DUCKDB_VER ?= 1.5.3
 BUILD_FLAGS := -tags=duckdb_use_lib
 
 .PHONY: test fmt vet sync build deploy logs status query token duckdb-connect push-installer install-on-server smoke help \
-        railway-token railway-docker-build railway-docker-run railway-duckdb-connect survey-result survey-reset
+        railway-token railway-docker-build railway-docker-run railway-duckdb-connect survey-result survey-reset survey-create
 
 SURVEY_HOST ?= survey.sspaeti.duckdns.org
 QUACK_HOST  ?= quack.sspaeti.duckdns.org
@@ -44,6 +44,9 @@ help:
 	@echo "  survey-reset             - DELETE every vote for a given SURVEY_ID."
 	@echo "                             Prompts to confirm (skip with CONFIRM=yes)."
 	@echo "                             usage: make survey-reset SURVEY_ID=<id>"
+	@echo "  survey-create            - Lock a SURVEY_ID to a fixed set of answer slugs."
+	@echo "                             Unregistered surveys stay open (any slug counts)."
+	@echo "                             usage: make survey-create SURVEY_ID=<id> ANSWERS=a,b,c"
 	@echo ""
 	@echo "Server target (run on FreeBSD as root, after 'ssh $(HOST)' && 'su root'):"
 	@echo "  install-on-server - one-shot setup: pkg deps, DuckDB $(DUCKDB_VER) build,"
@@ -283,4 +286,50 @@ survey-reset:
 	  echo "" && \
 	  echo "Deleted rows:" && \
 	  duckdb -init "$$tmp" -c "FROM rq('DELETE FROM votes WHERE survey_id = ''$(SURVEY_ID)'' RETURNING *');" && \
+	  echo "done."
+
+# Register a survey's allowed answer slugs. After this, only those answers
+# are recorded for that survey; anything else returns 200 without a vote
+# and logs `answer-reject`. Unregistered surveys stay in open mode.
+#
+#   make survey-create SURVEY_ID=2026-06-15 ANSWERS=awesome,good,better,worse
+#
+# Re-running upserts the row, so editing the answer set is a re-run with
+# new ANSWERS. To revert a survey back to open mode, delete its row via
+# `make survey-reset SURVEY_ID=<id>` is the wrong target (wipes votes); use
+# `make railway-duckdb-connect` and `FROM rq('DELETE FROM surveys WHERE
+# survey_id = ''<id>''')`.
+survey-create:
+	@command -v duckdb >/dev/null || { echo "error: duckdb CLI not on PATH (install duckdb locally first)" >&2; exit 1; }
+	@if [ -z "$$SURVEY_QUACK_TOKEN" ] || [ -z "$$RAILWAY_QUACK_HOST" ] || [ -z "$$RAILWAY_QUACK_PORT" ]; then \
+	    echo "error: need SURVEY_QUACK_TOKEN, RAILWAY_QUACK_HOST, RAILWAY_QUACK_PORT" >&2; \
+	    echo "       see docs/install-railway.md" >&2; \
+	    exit 1; \
+	fi
+	@if [ -z "$(SURVEY_ID)" ]; then \
+	    echo "error: SURVEY_ID is required" >&2; \
+	    echo "       usage: make survey-create SURVEY_ID=<id> ANSWERS=a,b,c" >&2; \
+	    exit 1; \
+	fi
+	@if [ -z "$(ANSWERS)" ]; then \
+	    echo "error: ANSWERS is required (comma-separated, e.g. awesome,good,better,worse)" >&2; \
+	    exit 1; \
+	fi
+	@if ! echo "$(SURVEY_ID)" | grep -qE '^[a-z0-9][a-z0-9_-]{0,63}$$'; then \
+	    echo "error: SURVEY_ID must match ^[a-z0-9][a-z0-9_-]{0,63}\$$" >&2; \
+	    exit 1; \
+	fi
+	@for a in $$(echo "$(ANSWERS)" | tr ',' ' '); do \
+	    echo "$$a" | grep -qE '^[a-z0-9][a-z0-9_-]{0,63}$$' || { \
+	        echo "error: invalid answer slug: $$a" >&2; \
+	        echo "       answers must match ^[a-z0-9][a-z0-9_-]{0,63}\$$" >&2; \
+	        exit 1; \
+	    }; \
+	done
+	@tmp=$$(mktemp) && trap "rm -f $$tmp" EXIT INT TERM HUP && \
+	  printf "INSTALL quack;\nLOAD quack;\nCREATE OR REPLACE MACRO rq(sql) AS TABLE (FROM quack_query('quack:%s:%s', sql, token => '%s', disable_ssl => true));\n" \
+	    "$$RAILWAY_QUACK_HOST" "$$RAILWAY_QUACK_PORT" "$$SURVEY_QUACK_TOKEN" > "$$tmp" && \
+	  echo "" && \
+	  echo "Registering survey_id='$(SURVEY_ID)' with allowed answers: $(ANSWERS)" && \
+	  duckdb -init "$$tmp" -c "FROM rq('INSERT INTO surveys (survey_id, allowed_answers) VALUES (''$(SURVEY_ID)'', ''$(ANSWERS)'') ON CONFLICT (survey_id) DO UPDATE SET allowed_answers = excluded.allowed_answers RETURNING *');" && \
 	  echo "done."
