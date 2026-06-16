@@ -45,7 +45,8 @@ the `survey_id` slug can view its results; nobody else can poke at the
 DB. Marked `noindex` so it doesn't end up in search engines.
 
 
-See [q.ssp.sh/result/init/](https://q.ssp.sh/result/init/) as an example:
+See [q.ssp.sh/result/init/](https://survey.ssp.sh/result/2026-06-04) as an example:
+![image](static/images/result-example.webp)
 
 
 ## How votes are deduplicated
