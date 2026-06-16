@@ -1,4 +1,4 @@
-# minimal-newsletter-survey
+# pollmd: A Minimal (Newsletter) Poll Tool That Works in Markdown
 
 Pollmd is a ~200-line Go service that records anonymous reader ratings from newsletter
 links into a [DuckDB](https://ssp.sh/brain/duckdb) file. Per-newsletter, per-answer, no cookies, no JS.
@@ -159,27 +159,25 @@ flowchart LR
     subgraph rly["Railway"]
         Edge["HTTPS edge · auto-TLS"]
         TCP["TCP Proxy · plaintext + token"]
-
+        
         subgraph cont["pollmd container · single Go process (CGO)"]
             HTTP["net/http :8080<br/>vote / landing / result / thanks / style"]
             QSrv["Quack listener :9494<br/>started by CALL quack_serve"]
             DB[("libduckdb 1.5.3<br/>single writer · in-process")]
             Salt["32-byte salt in memory<br/>rotates @ UTC midnight"]
         end
-
+        
         V[("Persistent volume<br/>votes.duckdb")]
     end
 
-    B -->|GET /{id}/{answer}| Edge
+    B -->|"GET /{id}/{answer}"| Edge
     Edge --> HTTP
     HTTP -->|"RecordVote, TallyBySurvey, GetAllowedAnswers"| DB
-    HTTP -.->|voter.Hash| Salt
-
+    HTTP -.->|"voter.Hash"| Salt
     M -->|"survey-create writes via Quack"| TCP
     D -->|"quack_query over HTTP"| TCP
     TCP --> QSrv
     QSrv -->|"reads/writes in same process"| DB
-
     DB --> V
 ```
 
@@ -207,15 +205,20 @@ flowchart TD
     Click --> Edge["Railway HTTPS edge"]
     Edge --> H["Go handleSurvey()"]
     H --> Method{"HTTP method?"}
+    
     Method -->|"HEAD (Safe Links prefetch)"| OK1["200 · no record"]
-    Method -->|GET| Slug{"slug regex<br/>matches id + answer?"}
-    Slug -->|no| Err["400 Bad Request"]
-    Slug -->|yes| Bot{"User-Agent<br/>looks like a bot?"}
+    Method -->|"GET"| Slug{"slug regex<br/>matches id + answer?"}
+    
+    Slug -->|"no"| Err["400 Bad Request"]
+    Slug -->|"yes"| Bot{"User-Agent<br/>looks like a bot?"}
+    
     Bot -->|"TwitterBot, etc."| OK2["200 · log bot-skip"]
-    Bot -->|browser| Reg{"survey_id<br/>in surveys table?"}
-    Reg -->|"no (open mode)"| Hash["voter = sha256(ip || ua || daily_salt || survey_id)[:16]"]
-    Reg -->|yes &amp; answer allowed| Hash
-    Reg -->|yes &amp; answer NOT allowed| OK3["200 · log answer-reject"]
+    Bot -->|"browser"| Reg{"survey_id<br/>in surveys table?"}
+    
+    Reg -->|"no (open mode)"| Hash["voter = sha256(ip + ua + daily_salt + survey_id)[:16]"]
+    Reg -->|"yes and answer allowed"| Hash
+    Reg -->|"yes and answer NOT allowed"| OK3["200 · log answer-reject"]
+    
     Hash --> Up[("INSERT INTO votes<br/>ON CONFLICT (survey_id, voter)<br/>DO UPDATE — last vote wins")]
     Up --> Redir["302 → /thanks · log vote"]
 ```
