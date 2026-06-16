@@ -12,8 +12,23 @@ BUILD_FLAGS := -tags=duckdb_use_lib
 .PHONY: test fmt vet sync build deploy logs status query token duckdb-connect push-installer install-on-server smoke help \
         railway-token railway-docker-build railway-docker-run railway-duckdb-connect survey-result survey-reset survey-create survey-delete
 
-SURVEY_HOST ?= survey.sspaeti.duckdns.org
-QUACK_HOST  ?= quack.sspaeti.duckdns.org
+# Public HTTPS host for the Railway deploy (newsletter readers click here).
+# Railway terminates TLS on 443 and proxies to the container's port 8080
+# internally — externally there is no port in the URL. Override for a
+# self-hosted deploy: `make smoke SURVEY_HOST=survey.example.org`.
+SURVEY_HOST ?= q.ssp.sh
+
+# Quack endpoint — kept out of the repo because publishing the admin endpoint
+# alongside a leaked token would skip the "find the endpoint" step. The token
+# itself is the real lock, but defence-in-depth.
+#
+# Defaults to whatever RAILWAY_QUACK_HOST / RAILWAY_QUACK_PORT are exported in
+# the shell (the same env vars `survey-result`, `survey-create`, `survey-reset`,
+# `survey-delete`, and `railway-duckdb-connect` already consume), so a single
+# direnv / shell profile feeds every Quack-using target. Override on the CLI
+# for self-hosted: `make smoke QUACK_HOST=quack.example.org QUACK_PORT=9494`.
+QUACK_HOST  ?= $(RAILWAY_QUACK_HOST)
+QUACK_PORT  ?= $(RAILWAY_QUACK_PORT)
 
 # Public base URL printed by survey-create — the landing page URL plus
 # the markdown answer links are formatted using this. Override on the
@@ -126,7 +141,7 @@ query:
 	@echo "Paste into duckdb on your laptop:"
 	@echo ""
 	@echo "  CREATE SECRET (TYPE quack, TOKEN '<token from /usr/local/etc/survey/survey.env>');"
-	@echo "  ATTACH 'quack:$(QUACK_HOST)' AS s;"
+	@echo "  ATTACH 'quack:$(QUACK_HOST):$(QUACK_PORT)' AS s;"
 	@echo "  FROM s.votes ORDER BY ts DESC LIMIT 20;"
 
 # Print the Quack token from the server. Use as:
@@ -146,16 +161,29 @@ duckdb-connect:
 	    exit 1; \
 	fi
 	@tmp=$$(mktemp) && trap "rm -f $$tmp" EXIT INT TERM HUP && \
-	  printf "INSTALL quack;\nLOAD quack;\nATTACH 'quack:%s' AS s (TOKEN '%s');\n" \
-	    "$(QUACK_HOST)" "$$SURVEY_QUACK_TOKEN" > "$$tmp" && \
+	  printf "INSTALL quack;\nLOAD quack;\nATTACH 'quack:%s:%s' AS s (TOKEN '%s');\n" \
+	    "$(QUACK_HOST)" "$(QUACK_PORT)" "$$SURVEY_QUACK_TOKEN" > "$$tmp" && \
 	  echo "" && \
 	  echo "Connected. Try:  FROM s.votes ORDER BY ts DESC LIMIT 10;" && \
 	  echo "" && \
 	  duckdb -init "$$tmp"
 
-# End-to-end smoke test from the laptop. Uses HEAD on /survey/* (server returns
-# 200 without recording — anti-prefetch behavior), so no vote is created.
+# End-to-end smoke test from the laptop. Uses HEAD on /<id>/<answer> (server
+# returns 200 without recording — anti-prefetch behavior), so no vote is
+# created. The Quack endpoint is checked as raw TCP since Railway's TCP Proxy
+# is not HTTPS. Override SURVEY_HOST / QUACK_HOST / QUACK_PORT for non-Railway
+# deployments.
+#
+# NOTE: probe slugs must satisfy ^[a-z0-9][a-z0-9_-]{0,63}$ — otherwise the
+# server returns 400 from the slug check and /result/<id> fails even with a
+# healthy upstream. "smoke-test" matches; "_smoke" does not.
 smoke:
+	@if [ -z "$(QUACK_HOST)" ] || [ -z "$(QUACK_PORT)" ]; then \
+	    echo "error: QUACK_HOST / QUACK_PORT not set (default reads RAILWAY_QUACK_HOST / RAILWAY_QUACK_PORT from env)" >&2; \
+	    echo "       export them in your shell, or pass on the CLI:" >&2; \
+	    echo "         make smoke QUACK_HOST=<host> QUACK_PORT=<port>" >&2; \
+	    exit 1; \
+	fi
 	@set -e; \
 	pass=0; fail=0; \
 	check() { name="$$1"; shift; \
@@ -164,17 +192,18 @@ smoke:
 	echo "DNS"; \
 	check "$(SURVEY_HOST) resolves" sh -c 'dig +short $(SURVEY_HOST) | grep -E "^[0-9]+\."'; \
 	check "$(QUACK_HOST) resolves"  sh -c 'dig +short $(QUACK_HOST)  | grep -E "^[0-9]+\."'; \
-	echo "HTTPS (NPM + cert)"; \
+	echo "HTTPS (Railway edge)"; \
 	check "$(SURVEY_HOST) TLS OK"   sh -c 'curl -sf --max-time 8 -o /dev/null -w "%{http_code}" https://$(SURVEY_HOST)/healthz | grep -E "^(200|502|404)$$"'; \
-	check "$(QUACK_HOST) TLS OK"    sh -c 'curl -s  --max-time 8 -o /dev/null -w "%{http_code}" https://$(QUACK_HOST)/        | grep -E "^[2-5][0-9][0-9]$$"'; \
+	echo "Quack TCP proxy"; \
+	check "$(QUACK_HOST):$(QUACK_PORT) reachable" sh -c 'nc -z -w 5 $(QUACK_HOST) $(QUACK_PORT)'; \
 	echo "Survey service"; \
 	check "/healthz returns 200"    sh -c '[ "$$(curl -s --max-time 8 -o /dev/null -w "%{http_code}" https://$(SURVEY_HOST)/healthz)" = "200" ]'; \
 	check "HEAD /<id>/<answer> returns 200 (no vote recorded)" \
-	                                sh -c '[ "$$(curl -sI --max-time 8 -o /dev/null -w "%{http_code}" https://$(SURVEY_HOST)/_smoke/test)" = "200" ]'; \
+	                                sh -c '[ "$$(curl -sI --max-time 8 -o /dev/null -w "%{http_code}" https://$(SURVEY_HOST)/smoke-test/probe)" = "200" ]'; \
 	check "HEAD /survey/<id>/<answer> still 200 (legacy back-compat)" \
-	                                sh -c '[ "$$(curl -sI --max-time 8 -o /dev/null -w "%{http_code}" https://$(SURVEY_HOST)/survey/_smoke/test)" = "200" ]'; \
+	                                sh -c '[ "$$(curl -sI --max-time 8 -o /dev/null -w "%{http_code}" https://$(SURVEY_HOST)/survey/smoke-test/probe)" = "200" ]'; \
 	check "/thanks returns 200"     sh -c '[ "$$(curl -s --max-time 8 -o /dev/null -w "%{http_code}" https://$(SURVEY_HOST)/thanks)" = "200" ]'; \
-	check "/result/<id> returns 200" sh -c '[ "$$(curl -s --max-time 8 -o /dev/null -w "%{http_code}" https://$(SURVEY_HOST)/result/_smoke)" = "200" ]'; \
+	check "/result/<id> returns 200" sh -c '[ "$$(curl -s --max-time 8 -o /dev/null -w "%{http_code}" https://$(SURVEY_HOST)/result/smoke-test)" = "200" ]'; \
 	echo ""; \
 	echo "$$pass passed, $$fail failed"; \
 	[ "$$fail" = "0" ]
