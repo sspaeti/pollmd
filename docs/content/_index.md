@@ -6,7 +6,7 @@ toc: false
 
 <div class="hx-mt-6 hx-mb-6">
 {{< hextra/hero-headline >}}
-  Minimal newsletter polls&nbsp;<br class="sm:hx-block hx-hidden" />in Markdown
+  Minimal polls in Markdown&nbsp;<br class="sm:hx-block hx-hidden" />(for Newsletters)
 {{< /hextra/hero-headline >}}
 </div>
 <br>
